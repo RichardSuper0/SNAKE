@@ -24,22 +24,11 @@
         const mode = !!navigator.gpu ? 'webgpu' : 'canvas2d';
         document.getElementById('mode-val').innerText = mode.toUpperCase();
 
-        window.graphics = {
-            mode: mode,
-            components: {}
-        };
+        window.graphics = { mode: mode };
 
-        async function fetchText(url) { const r = await fetch(url); return await r.text(); }
-
-        const [engineHTML, board, bg, mob, buttons] = await Promise.all([
-            fetchText('./modules/engine.html'),
-            fetchText('./modules/components/board.html'),
-            fetchText('./modules/components/background.html'),
-            fetchText('./modules/components/mob.html'),
-            fetchText('./modules/components/buttons.html')
-        ]);
-
-        window.graphics.components = { board, bg, mob, buttons };
+        const r = await fetch('./modules/engine.html');
+        const engineHTML = await r.text();
+        
         document.getElementById('game-root').innerHTML = engineHTML;
 
         const scriptText = new DOMParser().parseFromString(engineHTML, 'text/html').querySelector('script').textContent;
