@@ -1,0 +1,146 @@
+<div id="stage"></div>
+
+<script type="module">
+    const { mode } = window.graphics;
+    const GRID_SIZE = 30;
+
+    async function fetchText(url) { const r = await fetch(url); return await r.text(); }
+
+    const [board, bg, mob, buttons] = await Promise.all([
+        fetchText('./modules/components/board.html'),
+        fetchText('./modules/components/background.html'),
+        fetchText('./modules/components/mob.html'),
+        fetchText('./modules/components/buttons.html')
+    ]);
+
+    const wasmSource = `
+        export const grid_ptr: i32 = 0;
+        let snakeX: StaticArray<i32> = new StaticArray<i32>(900);
+        let snakeY: StaticArray<i32> = new StaticArray<i32>(900);
+        let len: i32 = 4;
+        let dir: i32 = 3; let nextDir: i32 = 3;
+        let fX: i32 = 5; let fY: i32 = 5;
+        let score: i32 = 0;
+
+        import function onScore(s: i32): void;
+        import function onDead(): void;
+
+        export function init(): void {
+            len = 4; dir = 3; nextDir = 3; score = 0;
+            for(let i=0; i<len; i++) { snakeX[i] = 15 - i; snakeY[i] = 15; }
+            spawnFood();
+        }
+        export function setDir(d: i32): void {
+            if(d==0 && dir!=1) nextDir = d; if(d==1 && dir!=0) nextDir = d;
+            if(d==2 && dir!=3) nextDir = d; if(d==3 && dir!=2) nextDir = d;
+        }
+        function spawnFood(): void {
+            fX = i32(Math.random() * 30); fY = i32(Math.random() * 30);
+        }
+        export function update(): void {
+            dir = nextDir;
+            let nX = snakeX; let nY = snakeY;
+            if(dir==0) nY--; if(dir==1) nY++; if(dir==2) nX--; if(dir==3) nX++;
+            
+            if(nX<0 || nX>=30 || nY<0 || nY>=30) { onDead(); return; }
+            for(let i=0; i<len; i++) { if(snakeX[i]==nX && snakeY[i]==nY) { onDead(); return; } }
+
+            if(nX==fX && nY==fY) { len++; score+=10; onScore(score); spawnFood(); }
+            for(let i=len-1; i>0; i--) { snakeX[i]=snakeX[i-1]; snakeY[i]=snakeY[i-1]; }
+            snakeX=nX; snakeY=nY;
+
+            for(let i=0; i<900; i++) store<u8>(grid_ptr+i, 0);
+            store<u8>(grid_ptr + (fY*30 + fX), 2);
+            for(let i=0; i<len; i++) store<u8>(grid_ptr + (snakeY[i]*30 + snakeX[i]), 1);
+        }
+    `;
+
+    const { binary } = asc.compileString(wasmSource, { optimize: 3 });
+    const wasm = await WebAssembly.instantiate(binary, {
+        env: {
+            onScore: (s) => document.getElementById('score').innerText = String(s).padStart(3, '0'),
+            onDead: () => { alert('Game Over!'); inst.exports.init(); },
+            abort: () => {}
+        }
+    });
+    const inst = wasm.instance;
+    inst.exports.init();
+
+    const parse = (str) => {
+        const doc = new DOMParser().parseFromString(str, 'text/html');
+        return {
+            style: doc.querySelector('style')?.textContent || '',
+            html: doc.body.innerHTML || '',
+            script: doc.querySelector('script')?.textContent || ''
+        };
+    };
+
+    const cBoard = parse(board);
+    const cBg = parse(bg);
+    const cMob = parse(mob);
+    const cButtons = parse(buttons);
+
+    document.getElementById('stage').innerHTML = `
+        <style>${cBoard.style} ${cButtons.style}</style>
+        ${cBoard.html} ${cButtons.html}
+    `;
+
+    const gfBg = new Function(`${cBg.script}; return {initWebGPU, render2d, renderWebGPU}`)();
+    const gfMob = new Function(`${cMob.script}; return {initWebGPU, render2d, renderWebGPU}`)();
+
+    window.addEventListener('keydown', e => {
+        if(e.key==='ArrowUp'||e.key==='w') inst.exports.setDir(0);
+        if(e.key==='ArrowDown'||e.key==='s') inst.exports.setDir(1);
+        if(e.key==='ArrowLeft'||e.key==='a') inst.exports.setDir(2);
+        if(e.key==='ArrowRight'||e.key==='d') inst.exports.setDir(3);
+    });
+    ['up','down','left','right'].forEach((id, idx) => {
+        const b = document.getElementById(`btn-${id}`);
+        if(b) b.onclick = () => inst.exports.setDir(idx);
+    });
+
+    const canvas = document.getElementById('renderCanvas');
+    let gpuDevice, gpuContext, ctx2d;
+
+    if (mode === 'webgpu') {
+        const adapter = await navigator.gpu.requestAdapter();
+        gpuDevice = await adapter.requestDevice();
+        gpuContext = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        gpuContext.configure({ device: gpuDevice, format, alphaMode: 'opaque' });
+
+        gfBg.initWebGPU(gpuDevice, format);
+        gfMob.initWebGPU(gpuDevice, format);
+    } else {
+        ctx2d = canvas.getContext('2d');
+    }
+
+    setInterval(() => {
+        inst.exports.update();
+        
+        const ptr = inst.exports.grid_ptr.value;
+        const gridMem = new Uint8Array(inst.exports.memory.buffer, ptr, GRID_SIZE * GRID_SIZE);
+
+        if (mode === 'webgpu') {
+            const commandEncoder = gpuDevice.createCommandEncoder();
+            const renderPass = commandEncoder.beginRenderPass({
+                colorAttachments: [{
+                    view: gpuContext.getCurrentTexture().createView(),
+                    clearValue: { r: 0.04, g: 0.03, b: 0.08, a: 1.0 },
+                    loadOp: 'clear', storeOp: 'store'
+                }]
+            });
+
+            gfBg.renderWebGPU(renderPass);
+            gfMob.renderWebGPU(renderPass, gridMem);
+
+            renderPass.end();
+            gpuDevice.queue.submit([commandEncoder.finish()]);
+        } else {
+            ctx2d.fillStyle = '#06050c';
+            ctx2d.fillRect(0, 0, 600, 600);
+            gfBg.render2d(ctx2d);
+            gfMob.render2d(ctx2d, gridMem);
+        }
+    }, 100);
+</script>
