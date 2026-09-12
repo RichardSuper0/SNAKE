@@ -1,23 +1,50 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="it">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SNAKE - Under Development</title>
+    <title>WASM Bootloader</title>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body, html { width: 100%; height: 100%; overflow: hidden; background: #0a0a12; font-family: sans-serif; display: flex; justify-content: center; align-items: center; }
-        #game-container { text-align: center; }
-        h1 { font-size: 48px; font-weight: bold; text-shadow: 0 0 15px #00ffcc; color: #00ffcc; letter-spacing: 5px; margin-bottom: 10px; }
-        p { font-size: 18px; color: #ffffff; opacity: 0.8; letter-spacing: 2px; }
+        body {
+            margin: 0; background: #090811; color: #fff;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            height: 100vh; font-family: system-ui, sans-serif; overflow: hidden;
+        }
+        #hud { font-size: 20px; margin-bottom: 10px; letter-spacing: 1px; }
+        span { font-weight: bold; color: #00f2fe; }
     </style>
+    <script src="https://jsdelivr.net"></script>
 </head>
 <body>
 
-    <div id="game-container">
-        <h1>SNAKE</h1>
-        <p>under development ..... 🛠</p>
-    </div>
+    <div id="hud">SCORE: <span id="score">000</span> | MODE: <span id="mode-val">...</span></div>
+    <div id="game-root"></div>
 
+    <script type="module">
+        const mode = !!navigator.gpu ? 'webgpu' : 'canvas2d';
+        document.getElementById('mode-val').innerText = mode.toUpperCase();
+
+        window.graphics = {
+            mode: mode,
+            components: {}
+        };
+
+        async function fetchText(url) { const r = await fetch(url); return await r.text(); }
+
+        const [engineHTML, board, bg, mob, buttons] = await Promise.all([
+            fetchText('./modules/engine.html'),
+            fetchText('./modules/components/board.html'),
+            fetchText('./modules/components/background.html'),
+            fetchText('./modules/components/mob.html'),
+            fetchText('./modules/components/buttons.html')
+        ]);
+
+        window.graphics.components = { board, bg, mob, buttons };
+        document.getElementById('game-root').innerHTML = engineHTML;
+
+        const scriptText = new DOMParser().parseFromString(engineHTML, 'text/html').querySelector('script').textContent;
+        const runEngine = new Function(scriptText);
+        runEngine();
+    </script>
 </body>
 </html>
