@@ -1,0 +1,58 @@
+<script>
+    let dev, pipe, vBuffer, iBuffer;
+    function initWebGPU(device, format) {
+        dev = device;
+        const v = new Float32Array([-1,1, 1,1, -1,-1, -1,-1, 1,1, 1,-1]);
+        vBuffer = device.createBuffer({ size: v.byteLength, usage: GPUBufferUsage.VERTEX, mappedAtCreation: true });
+        new Float32Array(vBuffer.getMappedRange()).set(v); vBuffer.unmap();
+        iBuffer = device.createBuffer({ size: 900 * 12, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+
+        const wgsl = `
+            struct V { @location(0) p: vec2<f32> }
+            struct I { @location(1) pos: vec2<f32>, @location(2) t: f32 }
+            struct O { @builtin(position) p: vec4<f32>, @location(0) c: vec3<f32> }
+            @vertex fn vs(v: V, i: I) -> O {
+                var o: O; let sz = 2.0 / 30.0;
+                let s = v.p * (sz * 0.88);
+                let x = -1.0 + (i.pos.x * sz) + (sz/2.0);
+                let y = 1.0 - (i.pos.y * sz) - (sz/2.0);
+                o.p = vec4<f32>(s.x + x, s.y + y, 0.0, 1.0);
+                o.c = select(vec3<f32>(1.0, 0.2, 0.4), vec3<f32>(0.0, 0.95, 0.7), i.t == 1.0);
+                return o;
+            }
+            @fragment fn fs(in: O) -> @location(0) vec4<f32> { return vec4<f32>(in.c, 1.0); }
+        `;
+        pipe = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: {
+                module: device.createShaderModule({code: wgsl}), entryPoint: 'vs',
+                buffers: [
+                    { arrayStride: 8, attributes: [{shaderLocation:0, format:'float32x2', offset:0}] },
+                    { arrayStride: 12, stepMode: 'instance', attributes: [{shaderLocation:1, format:'float32x2', offset:0}, {shaderLocation:2, format:'float32', offset:8}] }
+                ]
+            },
+            fragment: { module: device.createShaderModule({code: wgsl}), entryPoint: 'fs', targets: [{format}] }
+        });
+    }
+    function renderWebGPU(renderPass, mem) {
+        const data = new Float32Array(900 * 3); let c = 0;
+        for (let i = 0; i < mem.length; i++) {
+            if (mem[i] > 0) {
+                data[c*3+0] = i % 30; data[c*3+1] = Math.floor(i / 30); data[c*3+2] = mem[i]; c++;
+            }
+        }
+        if(c === 0) return;
+        dev.queue.writeBuffer(iBuffer, 0, data.buffer, 0, c * 12);
+        renderPass.setPipeline(pipe);
+        renderPass.setVertexBuffer(0, vBuffer);
+        renderPass.setVertexBuffer(1, iBuffer);
+        renderPass.draw(6, c);
+    }
+    function render2d(ctx, mem) {
+        for (let i = 0; i < mem.length; i++) {
+            if (mem[i] === 0) continue;
+            ctx.fillStyle = mem[i] === 1 ? '#00f2fe' : '#ff2a5f';
+            ctx.fillRect((i%30)*20 + 1, Math.floor(i/30)*20 + 1, 18, 18);
+        }
+    }
+</script>
