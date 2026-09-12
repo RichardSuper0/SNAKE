@@ -1,0 +1,11 @@
+<style>
+    .pad { display: grid; grid-template-columns: repeat(3, 50px); grid-template-rows: repeat(3, 50px); gap: 10px; margin: 15px auto; width: 170px; }
+    button { background: #161426; border: 1px solid #322e54; color: #fff; font-size: 16px; border-radius: 8px; cursor: pointer; user-select: none; }
+    button:active { background: #00f2fe; color: #000; }
+    .inv { visibility: hidden; }
+</style>
+<div class="pad">
+    <div class="inv"></div><button id="btn-up">▲</button><div class="inv"></div>
+    <button id="btn-left">◀</button><div class="inv"></div><button id="btn-right">▶</button>
+    <div class="inv"></div><button id="btn-down">▼</button><div class="inv"></div>
+</div>
