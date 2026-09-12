@@ -102,6 +102,25 @@
     const canvas = document.getElementById('renderCanvas');
     let gpuDevice, gpuContext, ctx2d;
 
+    function resizeToDevice() {
+        const padding = 20;
+        const controlsHeight = 180; 
+        const maxW = window.innerWidth - padding;
+        const maxH = window.innerHeight - controlsHeight - padding;
+        const size = Math.floor(Math.min(maxW, maxH));
+        
+        canvas.width = size;
+        canvas.height = size;
+        
+        const box = document.getElementById('canvas-box');
+        if (box) {
+            box.style.width = size + 'px';
+            box.style.height = size + 'px';
+        }
+    }
+    resizeToDevice();
+    window.addEventListener('resize', resizeToDevice);
+
     if (mode === 'webgpu') {
         const adapter = await navigator.gpu.requestAdapter();
         gpuDevice = await adapter.requestDevice();
@@ -115,9 +134,18 @@
         ctx2d = canvas.getContext('2d');
     }
 
-    setInterval(() => {
-        inst.exports.update();
-        
+    let lastTime = 0;
+    const stepInterval = 100;
+
+    function gameLoop(currentTime) {
+        if (!lastTime) lastTime = currentTime;
+        const delta = currentTime - lastTime;
+
+        if (delta >= stepInterval) {
+            inst.exports.update();
+            lastTime = currentTime - (delta % stepInterval);
+        }
+
         const ptr = inst.exports.grid_ptr.value;
         const gridMem = new Uint8Array(inst.exports.memory.buffer, ptr, GRID_SIZE * GRID_SIZE);
 
@@ -138,9 +166,17 @@
             gpuDevice.queue.submit([commandEncoder.finish()]);
         } else {
             ctx2d.fillStyle = '#06050c';
-            ctx2d.fillRect(0, 0, 600, 600);
+            ctx2d.fillRect(0, 0, canvas.width, canvas.height);
+            
+            ctx2d.save();
+            ctx2d.scale(canvas.width / 600, canvas.height / 600);
             gfBg.render2d(ctx2d);
             gfMob.render2d(ctx2d, gridMem);
+            ctx2d.restore();
         }
-    }, 100);
+
+        requestAnimationFrame(gameLoop);
+    }
+
+    requestAnimationFrame(gameLoop);
 </script>
