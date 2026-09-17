@@ -1,39 +1,652 @@
 <!DOCTYPE html>
 <html lang="it">
+
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WASM Bootloader</title>
-    <style>
-        body {
-            margin: 0; background: #090811; color: #fff;
-            display: flex; flex-direction: column; justify-content: center; align-items: center;
-            height: 100vh; font-family: system-ui, sans-serif; overflow: hidden;
-        }
-        #hud { font-size: 20px; margin-bottom: 10px; letter-spacing: 1px; }
-        span { font-weight: bold; color: #00f2fe; }
-    </style>
-    <script src="https://jsdelivr.net"></script>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Snake</title>
 </head>
+
 <body>
+    <main id="app" aria-busy="true">
+        <div id="backgroundSlot"></div>
+        <div id="buttonsSlot"></div>
+    </main>
 
-    <div id="hud">SCORE: <span id="score">000</span> | MODE: <span id="mode-val">...</span></div>
-    <div id="game-root"></div>
+    <script>
+        (async function boot() {
+            const modulePaths = {
+                background: 'modules/background.html',
+                board: 'modules/board.html',
+                snake: 'modules/snake.html',
+                apple: 'modules/apple.html',
+                buttons: 'modules/buttons.html'
+            };
 
-    <script type="module">
-        const mode = !!navigator.gpu ? 'webgpu' : 'canvas2d';
-        document.getElementById('mode-val').innerText = mode.toUpperCase();
+            async function loadModule(path) {
+                const response = await fetch(path, { cache: 'default' });
+                if (!response.ok) throw new Error(`Module ${path} failed: ${response.status}`);
+                return response.text();
+            }
 
-        window.graphics = { mode: mode };
+            const app = document.getElementById('app');
+            try {
+                const [background, board, snake, apple, buttons] = await Promise.all([
+                    loadModule(modulePaths.background),
+                    loadModule(modulePaths.board),
+                    loadModule(modulePaths.snake),
+                    loadModule(modulePaths.apple),
+                    loadModule(modulePaths.buttons)
+                ]);
 
-        const r = await fetch('./modules/engine.html');
-        const engineHTML = await r.text();
-        
-        document.getElementById('game-root').innerHTML = engineHTML;
+                document.getElementById('backgroundSlot').innerHTML = background;
+                document.getElementById('boardSlot').innerHTML = board;
+                document.getElementById('snakeSlot').innerHTML = snake;
+                document.getElementById('appleSlot').innerHTML = apple;
+                document.getElementById('buttonsSlot').innerHTML = buttons;
+            } catch (error) {
+                app.innerHTML = '<p class="module-error">Impossibile caricare i moduli del gioco.</p>';
+                console.error(error);
+                return;
+            }
 
-        const scriptText = new DOMParser().parseFromString(engineHTML, 'text/html').querySelector('script').textContent;
-        const runEngine = new Function(scriptText);
-        runEngine();
+            const canvas = document.getElementById('gameCanvas');
+            let ctx = null;
+            const scoreEl = document.getElementById('score');
+            const overlay = document.getElementById('overlay');
+            const startBtn = document.getElementById('startBtn');
+            const pauseBtn = document.getElementById('pauseBtn');
+            const restartBtn = document.getElementById('restartBtn');
+            const overlayTitle = overlay.querySelector('h1');
+            const overlayText = overlay.querySelector('p');
+
+            const GRID_SIZE = 16;
+            const INITIAL_SNAKE = [
+                { x: 5, y: 8 },
+                { x: 4, y: 8 },
+                { x: 3, y: 8 }
+            ];
+
+            function createInitialSnake() {
+                return INITIAL_SNAKE.map(segment => ({ ...segment }));
+            }
+
+            const state = {
+                snake: createInitialSnake(),
+                food: { x: 11, y: 8 },
+                dir: { x: 1, y: 0 },
+                nextDir: { x: 1, y: 0 },
+                score: 0,
+                running: false,
+                started: false,
+                paused: false,
+                lastTime: 0,
+                tickMs: 120,
+                gpu: null,
+                wasm: null
+            };
+
+            function updateScore() {
+                scoreEl.textContent = String(state.score);
+            }
+
+            function wasmAdd(left, right) {
+                return state.wasm && state.wasm.add ? state.wasm.add(left, right) : left + right;
+            }
+
+            function wasmMove(x, y, dx, dy) {
+                if (state.wasm && state.wasm.move) {
+                    return state.wasm.move(x, y, dx, dy);
+                }
+                return x + dx;
+            }
+
+            async function initWasm() {
+                const bytes = new Uint8Array([
+                    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+                    0x01, 0x0f, 0x02,
+                    0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f,
+                    0x60, 0x04, 0x7f, 0x7f, 0x7f, 0x7f, 0x01, 0x7f,
+                    0x03, 0x03, 0x02, 0x00, 0x01,
+                    0x07, 0x0e, 0x02,
+                    0x03, 0x61, 0x64, 0x64, 0x00, 0x00,
+                    0x04, 0x6d, 0x6f, 0x76, 0x65, 0x00, 0x01,
+                    0x0a, 0x11, 0x02,
+                    0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b,
+                    0x07, 0x00, 0x20, 0x00, 0x20, 0x02, 0x6a, 0x0b
+                ]);
+                try {
+                    const module = await WebAssembly.instantiate(bytes);
+                    state.wasm = module.instance.exports;
+                } catch (error) {
+                    state.wasm = null;
+                }
+            }
+
+            function spawnFood() {
+                let candidate;
+                let tries = 0;
+                do {
+                    candidate = {
+                        x: Math.floor(Math.random() * GRID_SIZE),
+                        y: Math.floor(Math.random() * GRID_SIZE)
+                    };
+                    tries++;
+                } while (tries < 500 && state.snake.some(seg => seg.x === candidate.x && seg.y === candidate.y));
+                state.food = candidate;
+            }
+
+            function resetGame() {
+                state.snake = createInitialSnake();
+                state.dir = { x: 1, y: 0 };
+                state.nextDir = { x: 1, y: 0 };
+                state.score = 0;
+                state.running = true;
+                state.started = true;
+                state.paused = false;
+                pauseBtn.textContent = 'Pausa';
+                overlayTitle.textContent = 'SNAKE';
+                overlayText.textContent = 'WASD o Frecce per muoverti';
+                startBtn.textContent = 'Gioca';
+                spawnFood();
+                updateScore();
+                overlay.classList.add('hidden');
+            }
+
+            function startGame() {
+                state.running = true;
+                state.started = true;
+                state.paused = false;
+                pauseBtn.textContent = 'Pausa';
+                overlay.classList.add('hidden');
+            }
+
+            function endGame() {
+                state.running = false;
+                state.started = false;
+                overlayTitle.textContent = 'GAME OVER';
+                overlayText.textContent = 'Punteggio: ' + state.score;
+                startBtn.textContent = 'Riprova';
+                overlay.classList.remove('hidden');
+            }
+
+            function setDirection(dx, dy) {
+                const proposed = { x: dx, y: dy };
+                const reverse = proposed.x === -state.dir.x && proposed.y === -state.dir.y;
+                if (reverse) return;
+                state.nextDir = proposed;
+            }
+
+            function tick() {
+                if (!state.running || state.paused) return;
+
+                state.dir = state.nextDir;
+                const head = state.snake[0];
+                const nextHead = {
+                    x: wasmMove(head.x, head.y, state.dir.x, state.dir.y),
+                    y: head.y + state.dir.y
+                };
+
+                if (
+                    nextHead.x < 0 || nextHead.x >= GRID_SIZE ||
+                    nextHead.y < 0 || nextHead.y >= GRID_SIZE ||
+                    state.snake.some(seg => seg.x === nextHead.x && seg.y === nextHead.y)
+                ) {
+                    endGame();
+                    return;
+                }
+
+                const ateFood = nextHead.x === state.food.x && nextHead.y === state.food.y;
+                state.snake.unshift(nextHead);
+
+                if (ateFood) {
+                    state.score = wasmAdd(state.score, 1);
+                    updateScore();
+                    spawnFood();
+                } else {
+                    state.snake.pop();
+                }
+            }
+
+            function roundedRectPath(x, y, w, h, r) {
+                const radius = Math.min(r, w * 0.5, h * 0.5);
+                ctx.beginPath();
+                ctx.moveTo(x + radius, y);
+                ctx.lineTo(x + w - radius, y);
+                ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+                ctx.lineTo(x + w, y + h - radius);
+                ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+                ctx.lineTo(x + radius, y + h);
+                ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+                ctx.lineTo(x, y + radius);
+                ctx.quadraticCurveTo(x, y, x + radius, y);
+                ctx.closePath();
+            }
+
+            function drawFallback2D(time = 0) {
+                if (!ctx) return;
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.imageSmoothingEnabled = true;
+
+                const boardPad = Math.max(12, canvas.width * 0.04);
+                const boardSize = canvas.width - boardPad * 2;
+                const boardX = boardPad;
+                const boardY = boardPad;
+                const cell = boardSize / GRID_SIZE;
+
+                const bg = ctx.createRadialGradient(canvas.width * 0.5, canvas.height * 0.5, 20, canvas.width * 0.5, canvas.height * 0.5, canvas.width * 0.8);
+                bg.addColorStop(0, 'rgba(32, 128, 160, 0.7)');
+                bg.addColorStop(0.35, 'rgba(10, 22, 33, 0.92)');
+                bg.addColorStop(1, 'rgba(2, 7, 12, 1)');
+                ctx.fillStyle = bg;
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                ctx.save();
+                roundedRectPath(boardX, boardY, boardSize, boardSize, 26);
+                ctx.fillStyle = '#0b1a2a';
+                ctx.fill();
+                ctx.strokeStyle = '#315b7d';
+                ctx.lineWidth = Math.max(2, cell * 0.07);
+                ctx.stroke();
+
+                for (let y = 0; y < GRID_SIZE; y++) {
+                    for (let x = 0; x < GRID_SIZE; x++) {
+                        const px = boardX + x * cell;
+                        const py = boardY + y * cell;
+                        const tileGradient = ctx.createLinearGradient(px, py, px, py + cell);
+                        if ((x + y) % 2 === 0) {
+                            tileGradient.addColorStop(0, '#1d4661');
+                            tileGradient.addColorStop(1, '#14364f');
+                        } else {
+                            tileGradient.addColorStop(0, '#163a55');
+                            tileGradient.addColorStop(1, '#0e2a43');
+                        }
+                        ctx.fillStyle = tileGradient;
+                        roundedRectPath(px + 1.5, py + 1.5, cell - 3, cell - 3, cell * 0.12);
+                        ctx.fill();
+                        ctx.strokeStyle = 'rgba(153, 210, 222, 0.1)';
+                        ctx.lineWidth = Math.max(1, cell * 0.018);
+                        ctx.stroke();
+                    }
+                }
+                const boardSheen = ctx.createLinearGradient(boardX, boardY, boardX, boardY + boardSize);
+                boardSheen.addColorStop(0, 'rgba(255,255,255,0.07)');
+                boardSheen.addColorStop(0.18, 'rgba(255,255,255,0)');
+                boardSheen.addColorStop(1, 'rgba(0,0,0,0.14)');
+                ctx.fillStyle = boardSheen;
+                roundedRectPath(boardX, boardY, boardSize, boardSize, 26);
+                ctx.fill();
+                ctx.restore();
+
+                const appleX = boardX + state.food.x * cell + cell * 0.5;
+                const appleY = boardY + state.food.y * cell + cell * 0.5;
+                const pulse = 1 + Math.sin(time * 0.006) * 0.045;
+                const appleRadius = cell * 0.29 * pulse;
+
+                ctx.save();
+                ctx.shadowColor = 'rgba(255, 40, 55, 0.78)';
+                ctx.shadowBlur = cell * 0.34;
+                const appleGrad = ctx.createRadialGradient(
+                    appleX - appleRadius * 0.35,
+                    appleY - appleRadius * 0.4,
+                    appleRadius * 0.1,
+                    appleX,
+                    appleY,
+                    appleRadius * 1.25
+                );
+                appleGrad.addColorStop(0, '#ffb1a9');
+                appleGrad.addColorStop(0.24, '#ff5b58');
+                appleGrad.addColorStop(0.72, '#df3044');
+                appleGrad.addColorStop(1, '#9e1f38');
+                ctx.fillStyle = appleGrad;
+                ctx.beginPath();
+                ctx.moveTo(appleX, appleY + appleRadius);
+                ctx.bezierCurveTo(appleX - appleRadius * 1.15, appleY + appleRadius * 0.7, appleX - appleRadius * 1.05, appleY - appleRadius * 0.7, appleX - appleRadius * 0.25, appleY - appleRadius * 0.58);
+                ctx.bezierCurveTo(appleX - appleRadius * 0.05, appleY - appleRadius * 0.88, appleX + appleRadius * 0.05, appleY - appleRadius * 0.88, appleX + appleRadius * 0.25, appleY - appleRadius * 0.58);
+                ctx.bezierCurveTo(appleX + appleRadius * 1.05, appleY - appleRadius * 0.7, appleX + appleRadius * 1.15, appleY + appleRadius * 0.7, appleX, appleY + appleRadius);
+                ctx.closePath();
+                ctx.fill();
+                ctx.shadowBlur = 0;
+
+                ctx.strokeStyle = '#57321d';
+                ctx.lineWidth = Math.max(2, cell * 0.07);
+                ctx.lineCap = 'round';
+                ctx.beginPath();
+                ctx.moveTo(appleX, appleY - appleRadius * 0.58);
+                ctx.quadraticCurveTo(appleX + cell * 0.03, appleY - appleRadius - cell * 0.16, appleX + cell * 0.12, appleY - appleRadius - cell * 0.24);
+                ctx.stroke();
+
+                ctx.fillStyle = '#5baf57';
+                ctx.beginPath();
+                ctx.moveTo(appleX + cell * 0.08, appleY - appleRadius - cell * 0.16);
+                ctx.bezierCurveTo(appleX + cell * 0.3, appleY - appleRadius - cell * 0.38, appleX + cell * 0.48, appleY - appleRadius - cell * 0.13, appleX + cell * 0.42, appleY - appleRadius + cell * 0.02);
+                ctx.bezierCurveTo(appleX + cell * 0.28, appleY - appleRadius + cell * 0.02, appleX + cell * 0.16, appleY - appleRadius - cell * 0.04, appleX + cell * 0.08, appleY - appleRadius - cell * 0.16);
+                ctx.fill();
+
+                ctx.fillStyle = 'rgba(255,255,255,0.82)';
+                ctx.beginPath();
+                ctx.ellipse(appleX - appleRadius * 0.42, appleY - appleRadius * 0.28, appleRadius * 0.16, appleRadius * 0.28, -0.4, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = 'rgba(255,255,255,0.3)';
+                ctx.beginPath();
+                ctx.arc(appleX + appleRadius * 0.38, appleY + appleRadius * 0.32, appleRadius * 0.1, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+
+                ctx.save();
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                ctx.lineWidth = cell * 0.7;
+                ctx.strokeStyle = '#285f3c';
+                ctx.shadowColor = 'rgba(1, 24, 17, 0.62)';
+                ctx.shadowBlur = cell * 0.2;
+                ctx.beginPath();
+                for (let i = state.snake.length - 1; i >= 0; i--) {
+                    const seg = state.snake[i];
+                    const centerX = boardX + seg.x * cell + cell * 0.5;
+                    const centerY = boardY + seg.y * cell + cell * 0.5;
+                    if (i === state.snake.length - 1) {
+                        ctx.moveTo(centerX, centerY);
+                    } else {
+                        ctx.lineTo(centerX, centerY);
+                    }
+                }
+                ctx.stroke();
+                ctx.restore();
+
+                const head = state.snake[0];
+                const headX = boardX + head.x * cell + cell * 0.5;
+                const headY = boardY + head.y * cell + cell * 0.5;
+                const angle = Math.atan2(state.dir.y, state.dir.x);
+                const headLength = cell * 0.92;
+                const headWidth = cell * 0.78;
+
+                ctx.save();
+                ctx.translate(headX, headY);
+                ctx.rotate(angle);
+                const headGrad = ctx.createLinearGradient(-headLength * 0.5, -headWidth * 0.5, headLength * 0.5, headWidth * 0.5);
+                headGrad.addColorStop(0, '#245c3b');
+                headGrad.addColorStop(0.55, '#3f8750');
+                headGrad.addColorStop(1, '#78ad68');
+                ctx.fillStyle = headGrad;
+                ctx.shadowColor = 'rgba(3, 40, 28, 0.42)';
+                ctx.shadowBlur = cell * 0.12;
+                roundedRectPath(-headLength * 0.5, -headWidth * 0.5, headLength, headWidth, headWidth * 0.5);
+                ctx.fill();
+                ctx.shadowBlur = 0;
+
+                ctx.fillStyle = '#ffffff';
+                ctx.beginPath();
+                ctx.arc(headLength * 0.2, -headWidth * 0.22, cell * 0.105, 0, Math.PI * 2);
+                ctx.arc(headLength * 0.2, headWidth * 0.22, cell * 0.105, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = '#102b29';
+                ctx.beginPath();
+                ctx.arc(headLength * 0.24, -headWidth * 0.22, cell * 0.045, 0, Math.PI * 2);
+                ctx.arc(headLength * 0.24, headWidth * 0.22, cell * 0.045, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+            }
+
+            async function initWebGPU() {
+                if (!navigator.gpu) return null;
+                try {
+                    const adapter = await navigator.gpu.requestAdapter();
+                    if (!adapter) {
+                        console.warn('WebGPU: nessun adapter disponibile, uso Canvas 2D.');
+                        return null;
+                    }
+                    const device = await adapter.requestDevice();
+                    const context = canvas.getContext('webgpu');
+                    if (!context) return null;
+                    const format = navigator.gpu.getPreferredCanvasFormat();
+                    context.configure({ device, format, alphaMode: 'premultiplied' });
+
+                    const shader = `
+                    struct Uniforms { resolution: vec2<f32>, };
+                    @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+                    struct Out { @builtin(position) position: vec4<f32>, @location(0) color: vec4<f32>, };
+
+                    @vertex
+                    fn vs_main(
+                        @location(0) local: vec2<f32>,
+                        @location(1) offset: vec2<f32>,
+                        @location(2) size: vec2<f32>,
+                        @location(3) color: vec4<f32>
+                    ) -> Out {
+                        var o: Out;
+                        let p = local * size + offset;
+                        let ndc = (p / uniforms.resolution) * 2.0 - 1.0;
+                        o.position = vec4<f32>(ndc.x, 1.0 - ndc.y * 2.0, 0.0, 1.0);
+                        o.color = color;
+                        return o;
+                    }
+
+                    @fragment
+                    fn fs_main(i: Out) -> @location(0) vec4<f32> {
+                        return i.color;
+                    }
+                `;
+
+                    const module = device.createShaderModule({ code: shader });
+                    const quad = new Float32Array([
+                        -0.5, -0.5,
+                        0.5, -0.5,
+                        -0.5, 0.5,
+                        -0.5, 0.5,
+                        0.5, -0.5,
+                        0.5, 0.5
+                    ]);
+
+                    const quadBuffer = device.createBuffer({
+                        size: quad.byteLength,
+                        usage: GPUBufferUsage.VERTEX,
+                        mappedAtCreation: true
+                    });
+                    new Float32Array(quadBuffer.getMappedRange()).set(quad);
+                    quadBuffer.unmap();
+
+                    const uniformBuffer = device.createBuffer({
+                        size: 16,
+                        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+                    });
+
+                    const instanceBuffer = device.createBuffer({
+                        size: 4096,
+                        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
+                    });
+
+                    const bindGroupLayout = device.createBindGroupLayout({
+                        entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } }]
+                    });
+
+                    const bindGroup = device.createBindGroup({
+                        layout: bindGroupLayout,
+                        entries: [{ binding: 0, resource: { buffer: uniformBuffer } }]
+                    });
+
+                    const pipeline = device.createRenderPipeline({
+                        layout: device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
+                        vertex: {
+                            module,
+                            entryPoint: 'vs_main',
+                            buffers: [
+                                { arrayStride: 8, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }] },
+                                { arrayStride: 16, attributes: [{ shaderLocation: 1, offset: 0, format: 'float32x2' }, { shaderLocation: 2, offset: 8, format: 'float32x2' }] },
+                                { arrayStride: 16, attributes: [{ shaderLocation: 3, offset: 0, format: 'float32x4' }] }
+                            ]
+                        },
+                        fragment: {
+                            module,
+                            entryPoint: 'fs_main',
+                            targets: [{ format }]
+                        },
+                        primitive: { topology: 'triangle-list' }
+                    });
+
+                    return { device, context, pipeline, quadBuffer, uniformBuffer, instanceBuffer, bindGroup };
+                } catch (err) {
+                    return null;
+                }
+            }
+
+            function buildGpuData() {
+                const cell = canvas.width / GRID_SIZE;
+                const data = [];
+
+                const bg = [0, 0, canvas.width, canvas.height, 0.05, 0.12, 0.18, 1.0];
+                data.push(bg);
+
+                for (let x = 0; x <= GRID_SIZE; x++) {
+                    const px = x * cell;
+                    data.push([px, 0, 1, canvas.height, 0.18, 0.2, 0.26, 0.35]);
+                }
+                for (let y = 0; y <= GRID_SIZE; y++) {
+                    const py = y * cell;
+                    data.push([0, py, canvas.width, 1, 0.18, 0.2, 0.26, 0.35]);
+                }
+
+                const foodX = state.food.x * cell;
+                const foodY = state.food.y * cell;
+                data.push([foodX + 1, foodY + 1, cell - 2, cell - 2, 1, 0.3, 0.3, 1]);
+
+                for (let i = 0; i < state.snake.length; i++) {
+                    const seg = state.snake[i];
+                    const x = seg.x * cell + 1;
+                    const y = seg.y * cell + 1;
+                    data.push([x, y, cell - 2, cell - 2, i === 0 ? 0.43 : 0.29, 0.9, 0.71, 1]);
+                }
+
+                return data;
+            }
+
+            function renderWebGPU() {
+                if (!state.gpu) return false;
+                const { device, context, pipeline, quadBuffer, uniformBuffer, instanceBuffer, bindGroup } = state.gpu;
+                const items = buildGpuData();
+                const instanceData = new Float32Array(items.flat());
+                device.queue.writeBuffer(instanceBuffer, 0, instanceData);
+                device.queue.writeBuffer(uniformBuffer, 0, new Float32Array([canvas.width, canvas.height]));
+
+                const encoder = device.createCommandEncoder();
+                const pass = encoder.beginRenderPass({
+                    colorAttachments: [{
+                        view: context.getCurrentTexture().createView(),
+                        clearValue: { r: 0.02, g: 0.08, b: 0.12, a: 1 },
+                        loadOp: 'clear',
+                        storeOp: 'store'
+                    }]
+                });
+
+                pass.setPipeline(pipeline);
+                pass.setBindGroup(0, bindGroup);
+                pass.setVertexBuffer(0, quadBuffer);
+                pass.setVertexBuffer(1, instanceBuffer);
+                pass.draw(6, items.length);
+                pass.end();
+                device.queue.submit([encoder.finish()]);
+                return true;
+            }
+
+            function render(time = 0) {
+                if (state.gpu) {
+                    try {
+                        if (!renderWebGPU()) throw new Error('WebGPU render failed');
+                        return;
+                    } catch (error) {
+                        console.warn('WebGPU fallback:', error);
+                        state.gpu = null;
+                        ctx = canvas.getContext('2d');
+                    }
+                } else {
+                    drawFallback2D(time);
+                    return;
+                }
+                drawFallback2D();
+            }
+
+            function resizeCanvas() {
+                const maxSide = Math.min(window.innerWidth * 0.88, window.innerHeight * 0.72);
+                const size = Math.min(maxSide, 560);
+                const pixelRatio = Math.min(window.devicePixelRatio || 1, 2.5);
+                canvas.width = Math.round(size * pixelRatio);
+                canvas.height = Math.round(size * pixelRatio);
+                canvas.style.width = size + 'px';
+                canvas.style.height = size + 'px';
+            }
+
+            function gameLoop(ts) {
+                if (ts - state.lastTime >= state.tickMs) {
+                    state.lastTime = ts;
+                    tick();
+                }
+                render(ts);
+                requestAnimationFrame(gameLoop);
+            }
+
+            document.addEventListener('keydown', (event) => {
+                const key = event.key.toLowerCase();
+                switch (key) {
+                    case 'arrowup':
+                    case 'w':
+                        setDirection(0, -1);
+                        break;
+                    case 'arrowdown':
+                    case 's':
+                        setDirection(0, 1);
+                        break;
+                    case 'arrowleft':
+                    case 'a':
+                        setDirection(-1, 0);
+                        break;
+                    case 'arrowright':
+                    case 'd':
+                        setDirection(1, 0);
+                        break;
+                    case ' ':
+                        if (state.started) {
+                            state.paused = !state.paused;
+                            pauseBtn.textContent = state.paused ? 'Riprendi' : 'Pausa';
+                        }
+                        break;
+                }
+            });
+
+            startBtn.addEventListener('click', () => {
+                if (!state.started) {
+                    resetGame();
+                } else {
+                    startGame();
+                }
+            });
+
+            pauseBtn.addEventListener('click', () => {
+                if (!state.started) return;
+                state.paused = !state.paused;
+                pauseBtn.textContent = state.paused ? 'Riprendi' : 'Pausa';
+            });
+
+            restartBtn.addEventListener('click', resetGame);
+
+            (async function init() {
+                resizeCanvas();
+                await initWasm();
+                state.gpu = await initWebGPU();
+                if (!state.gpu) {
+                    ctx = canvas.getContext('2d');
+                }
+                updateScore();
+                overlayTitle.textContent = 'SNAKE';
+                overlayText.textContent = 'WASD o Frecce per muoverti';
+                startBtn.textContent = 'Gioca';
+                render();
+                requestAnimationFrame(gameLoop);
+            })();
+
+            window.addEventListener('resize', resizeCanvas);
+            app.setAttribute('aria-busy', 'false');
+        })();
     </script>
 </body>
+
 </html>
