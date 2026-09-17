@@ -20,7 +20,9 @@
                 board: 'modules/board.html',
                 snake: 'modules/snake.html',
                 apple: 'modules/apple.html',
-                buttons: 'modules/buttons.html'
+                buttons: 'modules/buttons.html',
+                settings: 'modules/settings.html',
+                label: 'modules/label.html'
             };
 
             async function loadModule(path) {
@@ -31,12 +33,14 @@
 
             const app = document.getElementById('app');
             try {
-                const [background, board, snake, apple, buttons] = await Promise.all([
+                const [background, board, snake, apple, buttons, settings, label] = await Promise.all([
                     loadModule(modulePaths.background),
                     loadModule(modulePaths.board),
                     loadModule(modulePaths.snake),
                     loadModule(modulePaths.apple),
-                    loadModule(modulePaths.buttons)
+                    loadModule(modulePaths.buttons),
+                    loadModule(modulePaths.settings),
+                    loadModule(modulePaths.label)
                 ]);
 
                 document.getElementById('backgroundSlot').innerHTML = background;
@@ -44,11 +48,27 @@
                 document.getElementById('snakeSlot').innerHTML = snake;
                 document.getElementById('appleSlot').innerHTML = apple;
                 document.getElementById('buttonsSlot').innerHTML = buttons;
+                document.getElementById('settingsSlot').innerHTML = settings;
+                document.getElementById('labelSlot').innerHTML = label;
             } catch (error) {
                 app.innerHTML = '<p class="module-error">Impossibile caricare i moduli del gioco.</p>';
                 console.error(error);
                 return;
             }
+
+            const textures = {};
+
+            async function loadTexture(name) {
+                const source = document.querySelector(`[data-texture="${name}"]`);
+                if (!source) return;
+                const serialized = new XMLSerializer().serializeToString(source);
+                const image = new Image();
+                image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(serialized)}`;
+                await image.decode();
+                textures[name] = image;
+            }
+
+            await Promise.all(['background', 'board', 'snake', 'apple', 'appleWhite', 'appleYellow'].map(loadTexture));
 
             const canvas = document.getElementById('gameCanvas');
             let ctx = null;
@@ -57,8 +77,86 @@
             const startBtn = document.getElementById('startBtn');
             const pauseBtn = document.getElementById('pauseBtn');
             const restartBtn = document.getElementById('restartBtn');
+            const settingsBtn = document.getElementById('settingsBtn');
+            const settingsPlayBtn = document.getElementById('settingsPlayBtn');
+            const settingsPanel = document.getElementById('settingsPanel');
+            const settingsCloseBtn = document.getElementById('settingsCloseBtn');
+            const gameOverBtn = document.getElementById('gameOverBtn');
             const overlayTitle = overlay.querySelector('h1');
             const overlayText = overlay.querySelector('p');
+            const startLabel = overlay.querySelector('[data-label="start"]');
+            const gameOverLabel = overlay.querySelector('[data-label="gameover"]');
+            const buttonThemeSelect = document.getElementById('buttonThemeSelect');
+            const snakeThemeSelect = document.getElementById('snakeThemeSelect');
+            const boardThemeSelect = document.getElementById('boardThemeSelect');
+            const energySavingSelect = document.getElementById('energySavingSelect');
+
+            const themes = {
+                blue: {
+                    top: '#72b9f2', bottom: '#3478bd', shadow: '#24527e', text: '#ffffff',
+                    boardA: '#1d4661', boardB: '#112d48', screenTop: '#162b49', screenBottom: '#0a1325', panel: '#17345a',
+                    snake: '#4c9b5b', snakeDark: '#285f3c', rainbow: false
+                },
+                white: {
+                    top: '#ffffff', bottom: '#dbe4ee', shadow: '#8c9aaa', text: '#142033',
+                    boardA: '#f1f5f9', boardB: '#dbe4ee', screenTop: '#f8fafc', screenBottom: '#cbd5e1', panel: '#ffffff',
+                    snake: '#e5e7eb', snakeDark: '#94a3b8', rainbow: false
+                },
+                yellow: {
+                    top: '#ffe17a', bottom: '#eeb83d', shadow: '#916128', text: '#39220b',
+                    boardA: '#6e5b18', boardB: '#4d3e0d', screenTop: '#6b5717', screenBottom: '#1f1a08', panel: '#5a4812',
+                    snake: '#f3c64e', snakeDark: '#b7791f', rainbow: false
+                }
+            };
+
+            function resolveTheme(value) {
+                const base = value === 'random'
+                    ? ['white', 'yellow', 'whiteRainbow', 'yellowRainbow'][Math.floor(Math.random() * 4)]
+                    : value;
+                const explicitRainbow = base.endsWith('Rainbow');
+                const key = base.replace('Rainbow', '');
+                const rainbow = explicitRainbow || (!energySavingSelect.checked);
+                return { ...themes[key], rainbow };
+            }
+
+            function applyButtonTheme(theme) {
+                [startBtn, pauseBtn, restartBtn].forEach(button => {
+                    button.style.background = `linear-gradient(${theme.top}, ${theme.bottom})`;
+                    button.style.color = theme.text;
+                    button.style.boxShadow = `0 5px 0 ${theme.shadow}, 0 9px 18px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.72)`;
+                    button.style.border = theme.rainbow ? '3px solid transparent' : '3px solid transparent';
+                    button.style.borderImage = theme.rainbow ? 'linear-gradient(90deg, #ff4d6d, #ffd166, #70e000, #38bdf8, #a855f7, #ff4d6d) 1' : 'none';
+                });
+            }
+
+            function applyVisualThemes() {
+                const buttonTheme = resolveTheme(buttonThemeSelect.value);
+                const snakeTheme = resolveTheme(snakeThemeSelect.value);
+                const boardTheme = resolveTheme(boardThemeSelect.value);
+                state.theme = { button: buttonTheme, snake: snakeTheme, board: boardTheme };
+                applyButtonTheme(buttonTheme);
+                document.documentElement.style.setProperty('--screen-top', boardTheme.screenTop);
+                document.documentElement.style.setProperty('--screen-bottom', boardTheme.screenBottom);
+                document.documentElement.style.setProperty('--panel-color', boardTheme.panel);
+                document.documentElement.style.setProperty('--screen-text', boardTheme.text);
+            }
+
+            function applyEnergyDefaults() {
+                const defaultTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'yellow' : 'white';
+                buttonThemeSelect.value = defaultTheme;
+                snakeThemeSelect.value = defaultTheme;
+                boardThemeSelect.value = 'blue';
+            }
+
+            async function detectEnergySaving() {
+                if (typeof navigator.getBattery !== 'function') return;
+                try {
+                    const battery = await navigator.getBattery();
+                    energySavingSelect.checked = !battery.charging && battery.level <= 0.2;
+                } catch (error) {
+                    energySavingSelect.checked = false;
+                }
+            }
 
             const GRID_SIZE = 16;
             const INITIAL_SNAKE = [
@@ -83,8 +181,40 @@
                 lastTime: 0,
                 tickMs: 120,
                 gpu: null,
-                wasm: null
+                wasm: null,
+                theme: null,
+                settingsPaused: false
             };
+
+            [buttonThemeSelect, snakeThemeSelect, boardThemeSelect].forEach(select => {
+                select.addEventListener('change', applyVisualThemes);
+            });
+            energySavingSelect.addEventListener('change', applyVisualThemes);
+            function openSettings() {
+                state.settingsPaused = state.running && !state.paused;
+                state.paused = true;
+                settingsPanel.classList.add('open');
+            }
+
+            settingsBtn.addEventListener('click', openSettings);
+            settingsPlayBtn.addEventListener('click', openSettings);
+            settingsCloseBtn.addEventListener('click', () => {
+                settingsPanel.classList.remove('open');
+                if (state.settingsPaused) state.paused = false;
+                state.settingsPaused = false;
+            });
+            gameOverBtn.addEventListener('click', resetGame);
+            window.googleTranslateElementInit = function () {
+                if (!window.google || !google.translate) return;
+                new google.translate.TranslateElement({ pageLanguage: 'it', includedLanguages: 'de,en,es,fr,it,pt' }, 'google_translate_element');
+            };
+            const translateScript = document.createElement('script');
+            translateScript.src = 'https://translate.google.com/translate_a/element.js?cb=googleTranslateElementInit';
+            translateScript.async = true;
+            document.head.appendChild(translateScript);
+            await detectEnergySaving();
+            applyEnergyDefaults();
+            applyVisualThemes();
 
             function updateScore() {
                 scoreEl.textContent = String(state.score);
@@ -137,6 +267,7 @@
             }
 
             function resetGame() {
+                applyVisualThemes();
                 state.snake = createInitialSnake();
                 state.dir = { x: 1, y: 0 };
                 state.nextDir = { x: 1, y: 0 };
@@ -150,6 +281,8 @@
                 startBtn.textContent = 'Gioca';
                 spawnFood();
                 updateScore();
+                startLabel.hidden = false;
+                gameOverLabel.hidden = true;
                 overlay.classList.add('hidden');
             }
 
@@ -164,9 +297,9 @@
             function endGame() {
                 state.running = false;
                 state.started = false;
-                overlayTitle.textContent = 'GAME OVER';
-                overlayText.textContent = 'Punteggio: ' + state.score;
-                startBtn.textContent = 'Riprova';
+                overlay.querySelector('#gameOverText').textContent = 'Punteggio: ' + state.score;
+                startLabel.hidden = true;
+                gameOverLabel.hidden = false;
                 overlay.classList.remove('hidden');
             }
 
@@ -223,10 +356,28 @@
                 ctx.closePath();
             }
 
+            function rainbowStroke(context, x, y, size, time) {
+                if (typeof context.createConicGradient !== 'function') {
+                    return '#e879f9';
+                }
+                const gradient = context.createConicGradient((time * 0.001) % (Math.PI * 2), x + size * 0.5, y + size * 0.5);
+                gradient.addColorStop(0, '#ff4d6d');
+                gradient.addColorStop(0.2, '#ffd166');
+                gradient.addColorStop(0.4, '#70e000');
+                gradient.addColorStop(0.6, '#38bdf8');
+                gradient.addColorStop(0.8, '#a855f7');
+                gradient.addColorStop(1, '#ff4d6d');
+                return gradient;
+            }
+
             function drawFallback2D(time = 0) {
                 if (!ctx) return;
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
                 ctx.imageSmoothingEnabled = true;
+
+                if (textures.background) {
+                    ctx.drawImage(textures.background, 0, 0, canvas.width, canvas.height);
+                }
 
                 const boardPad = Math.max(12, canvas.width * 0.04);
                 const boardSize = canvas.width - boardPad * 2;
@@ -243,9 +394,10 @@
 
                 ctx.save();
                 roundedRectPath(boardX, boardY, boardSize, boardSize, 26);
-                ctx.fillStyle = '#0b1a2a';
+                const boardTheme = state.theme.board;
+                ctx.fillStyle = textures.board ? ctx.createPattern(textures.board, 'repeat') : boardTheme.boardB;
                 ctx.fill();
-                ctx.strokeStyle = '#315b7d';
+                ctx.strokeStyle = boardTheme.rainbow ? rainbowStroke(ctx, boardX, boardY, boardSize, time) : boardTheme.boardA;
                 ctx.lineWidth = Math.max(2, cell * 0.07);
                 ctx.stroke();
 
@@ -254,17 +406,13 @@
                         const px = boardX + x * cell;
                         const py = boardY + y * cell;
                         const tileGradient = ctx.createLinearGradient(px, py, px, py + cell);
-                        if ((x + y) % 2 === 0) {
-                            tileGradient.addColorStop(0, '#1d4661');
-                            tileGradient.addColorStop(1, '#14364f');
-                        } else {
-                            tileGradient.addColorStop(0, '#163a55');
-                            tileGradient.addColorStop(1, '#0e2a43');
-                        }
+                        const firstTile = (x + y) % 2 === 0;
+                        tileGradient.addColorStop(0, firstTile ? boardTheme.boardA : boardTheme.boardB);
+                        tileGradient.addColorStop(1, firstTile ? boardTheme.boardB : boardTheme.boardA);
                         ctx.fillStyle = tileGradient;
                         roundedRectPath(px + 1.5, py + 1.5, cell - 3, cell - 3, cell * 0.12);
                         ctx.fill();
-                        ctx.strokeStyle = 'rgba(153, 210, 222, 0.1)';
+                        ctx.strokeStyle = boardTheme.rainbow ? 'rgba(255,255,255,0.2)' : 'rgba(20, 35, 50, 0.18)';
                         ctx.lineWidth = Math.max(1, cell * 0.018);
                         ctx.stroke();
                     }
@@ -333,11 +481,24 @@
                 ctx.fill();
                 ctx.restore();
 
+                const fixedAppleTexture = textures.apple;
+                if (fixedAppleTexture) {
+                    ctx.save();
+                    ctx.globalAlpha = 0.96;
+                    ctx.shadowColor = 'rgba(255, 40, 55, 0.55)';
+                    ctx.shadowBlur = cell * 0.25;
+                    ctx.drawImage(fixedAppleTexture, appleX - cell * 0.48, appleY - cell * 0.48, cell * 0.96, cell * 0.96);
+                    ctx.restore();
+                }
+
                 ctx.save();
                 ctx.lineCap = 'round';
                 ctx.lineJoin = 'round';
                 ctx.lineWidth = cell * 0.7;
-                ctx.strokeStyle = '#285f3c';
+                const snakeTheme = state.theme.snake;
+                ctx.strokeStyle = snakeTheme.rainbow
+                    ? rainbowStroke(ctx, boardX, boardY, boardSize, time)
+                    : snakeTheme.snakeDark;
                 ctx.shadowColor = 'rgba(1, 24, 17, 0.62)';
                 ctx.shadowBlur = cell * 0.2;
                 ctx.beginPath();
@@ -352,6 +513,13 @@
                     }
                 }
                 ctx.stroke();
+                if (textures.snake) {
+                    const snakeTexture = ctx.createPattern(textures.snake, 'repeat');
+                    ctx.globalAlpha = 0.28;
+                    ctx.strokeStyle = snakeTexture;
+                    ctx.stroke();
+                    ctx.globalAlpha = 1;
+                }
                 ctx.restore();
 
                 const head = state.snake[0];
@@ -365,9 +533,9 @@
                 ctx.translate(headX, headY);
                 ctx.rotate(angle);
                 const headGrad = ctx.createLinearGradient(-headLength * 0.5, -headWidth * 0.5, headLength * 0.5, headWidth * 0.5);
-                headGrad.addColorStop(0, '#245c3b');
-                headGrad.addColorStop(0.55, '#3f8750');
-                headGrad.addColorStop(1, '#78ad68');
+                headGrad.addColorStop(0, snakeTheme.snakeDark);
+                headGrad.addColorStop(0.55, snakeTheme.snake);
+                headGrad.addColorStop(1, snakeTheme.boardA);
                 ctx.fillStyle = headGrad;
                 ctx.shadowColor = 'rgba(3, 40, 28, 0.42)';
                 ctx.shadowBlur = cell * 0.12;
